@@ -1,0 +1,183 @@
+//Map SDOs
+map U16 controlWord as output 0x6040:00
+map U16 statusWord as input 0x6041:00
+
+//Don't necessarily need to map these...
+map S08 opMode as input 0x6060:00
+map U32 dInput as input 0x60FD:00
+
+map S32 actualPosition as input 0x6064:00
+/*map S32 targetPosition as output 0x607A:00
+map U32 profileVelocity as output 0x6081:00
+map U08 polarity as output 0x607E:00*/
+
+#include "wrapper.h"
+
+//Setup Variables
+bool setupComplete = 0;	//Set to zero at power-on, cleared after setup complete
+
+
+void user()
+{
+	if(setupComplete == 0)
+	{
+		VmmDebugOutputString("Setup\n");
+		//Homing
+		od_write(0x3240, 0x01, 1);	//Configure dInput1 as negative limit switch
+		od_write(0x3240, 0x02, 0);	//Do not invert switch logic (closed switch = 1)
+		od_write(0x3240, 0x03, 0);	//Do not force values (with software)
+		od_write(0x3240, 0x06, 0);	//Set sense range to 5V (not 24V)
+		yield();
+
+		od_write(0x6060, 0x00, 6);	//Set to homing mode
+		od_write(0x607C, 0x00, 0);	//Difference between application and zero point of machine (from encoder?)
+		od_write(0x6098, 0x00, 17); //!Method: reference to negative limit switch (for CLOSING)
+		od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
+		od_write(0x6099, 0x02, 10);
+		yield();
+
+		//Position Actual (out of 2000)
+		VmmDebugOutputInt(od_read(0x6064, 0x00));
+		VmmDebugOutputString("\n");
+		yield();
+
+
+		od_write(0x6099, 0x02, 2);	//!Homing speed (zero), only for method with index?
+		//od_write(0x609A, 0x00, 0x01F4);		//Homing acceleration (default to 500 steps/s^2...is a step defined or encoder?)
+		//od_write(0x2052, 0x00, 0x01F4);	    //LS overshoot tolerance (in steps?)
+		//od_write(0x203A, 0x01, 0xFFFFFFBA);	//Minimum current for blocking detection (default 70%)
+		od_write(0x203A, 0x02, 10);			//Time in ms to push against block after current detection
+		//od_write(0x203A, 0x03, 10);			//Time in ms that current has to be above threshold to detect a block
+
+		setupComplete = 1;
+		yield();
+
+		//To Do
+		/*
+		-Set QS ramp in 0x6085 (QS to SO disabled mode)
+		-Bit 4 set, ref started; clear to stop
+		-OMS bits in statusWord
+		*/
+	}
+
+	//Homing
+	//od_write(0x6098, 0x00, 35); 	//homing, sets current position to home (based on what? encoder?)
+	//od_write(0x608F, 0x01, 720);	//Position resolution, 720 steps/rev (0.5 degree steps)
+	//od_write(0x608F, 0x02, 1);		//1 encoder rev per motor turn=
+
+	//STATE MACHINE
+	//Request state "enable voltage" (QS|EV)
+	Out.controlWord = 0x06;
+	yield();
+	while((In.statusWord & 0xEF) != 0x21)
+	{
+		yield();
+	}
+
+	//Request state "switched on" (QS|EV|SO)
+	Out.controlWord = 0x07;
+	yield();
+	while((In.statusWord & 0xEF) != 0x23)
+	{
+		yield();
+	}
+
+	//Request state "enable operation" (EO|QS|EV|SO)
+	Out.controlWord = 0x0F;
+	yield();
+	while((In.statusWord & 0xEF) != 0x27)
+	{
+		yield();
+	}
+
+	//Request state "enable operation" (OMS[0]|EO|QS|EV|SO)
+	Out.controlWord = 0x1F;
+	yield();
+
+	S16 i;
+	//Wait for bits 10 and 12 in statusWord to be set, indicating homing complete
+	while((In.statusWord & 0x1400) != 0x1400)
+	{
+		if(i >= 500)
+		{
+			VmmDebugOutputInt(In.dInput);
+			i = 0;
+		}
+		i+=1;
+		yield();
+	}
+
+
+
+	//Position Actual (out of 2000)
+	VmmDebugOutputInt(od_read(0x6064, 0x00));
+	VmmDebugOutputString("\n");
+	yield();
+
+	VmmDebugOutputString("DONE");
+	VmmDebugOutputInt(In.statusWord);
+	yield();
+
+
+	od_write(0x6098, 0x00, 18); //!Method: reference to negative limit switch (for CLOSING)
+	od_write(0x3240, 0x01, 2);	//Configure dInput1 as negative limit switch
+
+	//STATE MACHINE
+	//Request state "enable voltage" (QS|EV)
+	Out.controlWord = 0x06;
+	yield();
+	while((In.statusWord & 0xEF) != 0x21)
+	{
+		yield();
+	}
+
+	//Request state "switched on" (QS|EV|SO)
+	Out.controlWord = 0x07;
+	yield();
+	while((In.statusWord & 0xEF) != 0x23)
+	{
+		yield();
+	}
+
+	//Request state "enable operation" (EO|QS|EV|SO)
+	Out.controlWord = 0x0F;
+	yield();
+	while((In.statusWord & 0xEF) != 0x27)
+	{
+		yield();
+	}
+
+	//Request state "enable operation" (OMS[0]|EO|QS|EV|SO)
+	Out.controlWord = 0x1F;
+	yield();
+
+	while((In.statusWord & 0x1400) != 0x1400)
+	{
+		if(i >= 500)
+		{
+			VmmDebugOutputInt(In.dInput);
+			i = 0;
+		}
+		i+=1;
+		yield();
+	}
+
+
+
+	od_write(0x2300, 0x00, 0);
+	yield();
+
+}
+
+
+
+
+/*
+Probe for four motors, request ID from each
+Note position of motor (P0)
+Execute homing (basically push against switch)
+Enter "ready" state
+Command "open"
+Command "quick stop" (return position)
+Command "close"
+*/
