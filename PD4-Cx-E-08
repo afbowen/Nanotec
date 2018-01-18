@@ -18,9 +18,13 @@ U08 statePetal;		//1 - stopped, 2 - opening, 2 - open, 3 - closing, 4 - closed
 
 U16 lastControlWord;
 U16 lastCommandedState;
-bool stopNow;
+bool comStop;
 
+//FUNCTIONS
 void homingStateMachine();
+U08 checkStateTimeout(U16, U08);
+void quickStop();
+void checkMotorMoving(S32);
 
 //user() is the main() loop
 void user()
@@ -38,7 +42,7 @@ void user()
 		od_write(0x608F, 0x01, 720);	//Position resolution, 720 steps/rev (0.5 degree steps)
 		od_write(0x608F, 0x02, 1);		//1 encoder rev per motor turn
 
-		stopNow = false;
+		comStop = false;
 
 		initialized = true;
 		yield();
@@ -57,17 +61,13 @@ void user()
 		*/
 	}
 
-
 	//Check for new command, set variable
 	commandPetal = In.externalCommand;
-	od_write(0x2400, 0x01, 0);	//Reset command register
-	//VmmDebugOutputInt(commandPetal);
+	if(commandPetal)
+	{
+		od_write(0x2400, 0x01, 0);	//Reset command register
+	}
 	yield();
-
-	//VmmDebugOutputInt(In.externalCommand);
-	//yield();
-
-	//Set commandPetal variable (if message available)
 
 	//Execute command (if available)
 	switch(commandPetal)
@@ -78,7 +78,7 @@ void user()
 
 		case 1:
 			//Issue quickstop
-			Out.controlWord = 0;
+			quickStop();
 			break;
 
 		case 2:
@@ -87,7 +87,7 @@ void user()
 			od_write(0x6060, 0x00, 6);	//Set to homing mode
 			od_write(0x6098, 0x00, 17); //Homing Method: reference to negative limit switch (for CLOSING)
 			od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
-			od_write(0x6099, 0x02, 10);
+			//od_write(0x6099, 0x02, 10);
 			homingStateMachine();
 			//od_write(0x607C, 0x00, 0);	//Difference between application and zero point of machine (from encoder?)
 			break;
@@ -98,7 +98,7 @@ void user()
 			od_write(0x6060, 0x00, 6);	//Set to homing mode
 			od_write(0x6098, 0x00, 18); //Homing Method: reference to negative limit switch (for OPENING, CCW)
 			od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
-			od_write(0x6099, 0x02, 10);
+			//od_write(0x6099, 0x02, 10);
 			homingStateMachine();
 			break;
 
@@ -107,23 +107,28 @@ void user()
 	}
 }
 
-
 void homingStateMachine()
 {
+	U08 stateTimeoutCounter = 0;
+
 	//STATE MACHINE
 	//Request state "enable voltage" (QS|EV)
 	Out.controlWord = 0x06;
 	yield();
 	while((In.statusWord & 0xEF) != 0x21)
 	{
+		stateTimeoutCounter = checkStateTimeout(0x0021, stateTimeoutCounter);
 		yield();
 	}
+
+	stateTimeoutCounter = 0;	//reset timeout counter for next state transition attempt
 
 	//Request state "switched on" (QS|EV|SO)
 	Out.controlWord = 0x07;
 	yield();
 	while((In.statusWord & 0xEF) != 0x23)
 	{
+		stateTimeoutCounter = checkStateTimeout(0x0023, stateTimeoutCounter);
 		yield();
 	}
 
@@ -132,6 +137,7 @@ void homingStateMachine()
 	yield();
 	while((In.statusWord & 0xEF) != 0x27)
 	{
+		stateTimeoutCounter = checkStateTimeout(0x0027, stateTimeoutCounter);
 		yield();
 	}
 
@@ -139,21 +145,22 @@ void homingStateMachine()
 	Out.controlWord = 0x1F;
 	yield();
 
-	//S16 i;
+	S16 i;
+	S32 lastPosition = In.positionActual;
 	//Wait for bits 10 and 12 in statusWord to be set, indicating homing complete
-	while((In.statusWord & 0x1400) != 0x1400 && !stopNow)
+	while((In.statusWord & 0x1400) != 0x1400 && !comStop)
 	{
-		/*if(i >= 3000)
+		i+=1;
+		if(i >= 100)	//every 100ms, check that motor is moving (!let's get direction in here once we haver actuator set up)
 		{
-			//VmmDebugOutputInt(In.dInput);
-			//VmmDebugOutputInt(In.positionActual);
-			VmmDebugOutputInt(In.externalCommand);
+			checkMotorMoving(lastPosition);
+			lastPosition = In.positionActual;
 			i = 0;
 		}
-		i+=1;*/
+
 		if(In.externalCommand > 0)
 		{
-			stopNow = true;
+			comStop = true;
 			Out.controlWord = 0; //quickstop
 		}
 		yield();
@@ -164,6 +171,41 @@ void homingStateMachine()
 	yield();
 }
 
+U08 checkStateTimeout(U16 nextState, U08 stateTimeoutCounter)
+{
+	if(stateTimeoutCounter > 100)
+	{
+		//Send error message indicating which state we're having trouble transitioning into
+		VmmDebugOutputString("Error: waiting for state ");
+		VmmDebugOutputInt(nextState);
+		VmmDebugOutputString("\n");
+		quickStop();
+		return stateTimeoutCounter;
+	}
+	else
+	{
+		return stateTimeoutCounter+=1; //increment counter
+	}
+}
+
+void checkMotorMoving(S32 lastPosition)
+{
+	if(lastPosition != In.positionActual)
+	{
+		return;
+	}
+	else
+	{
+		//Send error message indicating motor is NOT moving
+		VmmDebugOutputString("Motor not moving\n");
+		return;
+	}
+}
+
+void quickStop()
+{
+	Out.controlWord = 0;	//Quickstop
+}
 
 
 
