@@ -1,56 +1,53 @@
 //Map SDOs
 map U16 controlWord as output 0x6040:00
 map U16 statusWord as input 0x6041:00
+map S32 positionActual as input 0x6064:00
 
-//Don't necessarily need to map these...
+map S32 externalCommand as input 0x2400:01
+
+//Debug (no need to map in final)
 map S08 opMode as input 0x6060:00
 map U32 dInput as input 0x60FD:00
-
-map S32 actualPosition as input 0x6064:00
-/*map S32 targetPosition as output 0x607A:00
-map U32 profileVelocity as output 0x6081:00
-map U08 polarity as output 0x607E:00*/
 
 #include "wrapper.h"
 
 //Setup Variables
-bool setupComplete = 0;	//Set to zero at power-on, cleared after setup complete
+bool initialized;	//Set to zero at power-on, cleared after setup complete
+S32 commandPetal;	//1 - stop,    2 - close,   3 - open
+U08 statePetal;		//1 - stopped, 2 - opening, 2 - open, 3 - closing, 4 - closed
 
+U16 lastControlWord;
+U16 lastCommandedState;
+bool stopNow;
 
+void homingStateMachine();
+
+//user() is the main() loop
 void user()
 {
-	if(setupComplete == 0)
+	if(initialized == false)
 	{
-		VmmDebugOutputString("Setup\n");
-		//Homing
-		od_write(0x3240, 0x01, 1);	//Configure dInput1 as negative limit switch
-		od_write(0x3240, 0x02, 0);	//Do not invert switch logic (closed switch = 1)
-		od_write(0x3240, 0x03, 0);	//Do not force values (with software)
-		od_write(0x3240, 0x06, 0);	//Set sense range to 5V (not 24V)
+		VmmDebugOutputString("Initializing...");
+		//Configure for Homing
+		od_write(0x3240, 0x01, 0);	//Link limit switch input to homing point for limit switch
+		od_write(0x3240, 0x02, 0);	//Do not invert switch logic (for NC switch, set to 1)
+		od_write(0x3240, 0x03, 0);	//Do not force values with software (we're using limit switches)
+		od_write(0x3240, 0x06, 0);	//Set switch voltage range to 5V (for 24V, set to 1)
 		yield();
 
-		od_write(0x6060, 0x00, 6);	//Set to homing mode
-		od_write(0x607C, 0x00, 0);	//Difference between application and zero point of machine (from encoder?)
-		od_write(0x6098, 0x00, 17); //!Method: reference to negative limit switch (for CLOSING)
-		od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
-		od_write(0x6099, 0x02, 10);
+		od_write(0x608F, 0x01, 720);	//Position resolution, 720 steps/rev (0.5 degree steps)
+		od_write(0x608F, 0x02, 1);		//1 encoder rev per motor turn
+
+		stopNow = false;
+
+		initialized = true;
 		yield();
 
-		//Position Actual (out of 2000)
-		VmmDebugOutputInt(od_read(0x6064, 0x00));
-		VmmDebugOutputString("\n");
+		//Send ready message over CAN
+		VmmDebugOutputString("COMPLETE\n");
+		commandPetal = 0;
 		yield();
 
-
-		od_write(0x6099, 0x02, 2);	//!Homing speed (zero), only for method with index?
-		//od_write(0x609A, 0x00, 0x01F4);		//Homing acceleration (default to 500 steps/s^2...is a step defined or encoder?)
-		//od_write(0x2052, 0x00, 0x01F4);	    //LS overshoot tolerance (in steps?)
-		//od_write(0x203A, 0x01, 0xFFFFFFBA);	//Minimum current for blocking detection (default 70%)
-		od_write(0x203A, 0x02, 10);			//Time in ms to push against block after current detection
-		//od_write(0x203A, 0x03, 10);			//Time in ms that current has to be above threshold to detect a block
-
-		setupComplete = 1;
-		yield();
 
 		//To Do
 		/*
@@ -60,11 +57,59 @@ void user()
 		*/
 	}
 
-	//Homing
-	//od_write(0x6098, 0x00, 35); 	//homing, sets current position to home (based on what? encoder?)
-	//od_write(0x608F, 0x01, 720);	//Position resolution, 720 steps/rev (0.5 degree steps)
-	//od_write(0x608F, 0x02, 1);		//1 encoder rev per motor turn=
 
+	//Check for new command, set variable
+	commandPetal = In.externalCommand;
+	od_write(0x2400, 0x01, 0);	//Reset command register
+	//VmmDebugOutputInt(commandPetal);
+	yield();
+
+	//VmmDebugOutputInt(In.externalCommand);
+	//yield();
+
+	//Set commandPetal variable (if message available)
+
+	//Execute command (if available)
+	switch(commandPetal)
+	{
+		case 0:
+			//No new commands, break
+			break;
+
+		case 1:
+			//Issue quickstop
+			Out.controlWord = 0;
+			break;
+
+		case 2:
+			//Close
+			od_write(0x3240, 0x01, 1);	//Configure Digital Input 1 as negative limit switch (for CLOSING)
+			od_write(0x6060, 0x00, 6);	//Set to homing mode
+			od_write(0x6098, 0x00, 17); //Homing Method: reference to negative limit switch (for CLOSING)
+			od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
+			od_write(0x6099, 0x02, 10);
+			homingStateMachine();
+			//od_write(0x607C, 0x00, 0);	//Difference between application and zero point of machine (from encoder?)
+			break;
+
+		case 3:
+			//Open
+			od_write(0x3240, 0x01, 2);	//Configure Digital Input 2 as positive limit switch (for OPENING)
+			od_write(0x6060, 0x00, 6);	//Set to homing mode
+			od_write(0x6098, 0x00, 18); //Homing Method: reference to negative limit switch (for OPENING, CCW)
+			od_write(0x6099, 0x01, 60);	//!Homing speed (switch), rev/min check user units
+			od_write(0x6099, 0x02, 10);
+			homingStateMachine();
+			break;
+
+		default:
+			break;
+	}
+}
+
+
+void homingStateMachine()
+{
 	//STATE MACHINE
 	//Request state "enable voltage" (QS|EV)
 	Out.controlWord = 0x06;
@@ -94,79 +139,29 @@ void user()
 	Out.controlWord = 0x1F;
 	yield();
 
-	S16 i;
+	//S16 i;
 	//Wait for bits 10 and 12 in statusWord to be set, indicating homing complete
-	while((In.statusWord & 0x1400) != 0x1400)
+	while((In.statusWord & 0x1400) != 0x1400 && !stopNow)
 	{
-		if(i >= 500)
+		/*if(i >= 3000)
 		{
-			VmmDebugOutputInt(In.dInput);
+			//VmmDebugOutputInt(In.dInput);
+			//VmmDebugOutputInt(In.positionActual);
+			VmmDebugOutputInt(In.externalCommand);
 			i = 0;
 		}
-		i+=1;
-		yield();
-	}
-
-
-
-	//Position Actual (out of 2000)
-	VmmDebugOutputInt(od_read(0x6064, 0x00));
-	VmmDebugOutputString("\n");
-	yield();
-
-	VmmDebugOutputString("DONE");
-	VmmDebugOutputInt(In.statusWord);
-	yield();
-
-
-	od_write(0x6098, 0x00, 18); //!Method: reference to negative limit switch (for CLOSING)
-	od_write(0x3240, 0x01, 2);	//Configure dInput1 as negative limit switch
-
-	//STATE MACHINE
-	//Request state "enable voltage" (QS|EV)
-	Out.controlWord = 0x06;
-	yield();
-	while((In.statusWord & 0xEF) != 0x21)
-	{
-		yield();
-	}
-
-	//Request state "switched on" (QS|EV|SO)
-	Out.controlWord = 0x07;
-	yield();
-	while((In.statusWord & 0xEF) != 0x23)
-	{
-		yield();
-	}
-
-	//Request state "enable operation" (EO|QS|EV|SO)
-	Out.controlWord = 0x0F;
-	yield();
-	while((In.statusWord & 0xEF) != 0x27)
-	{
-		yield();
-	}
-
-	//Request state "enable operation" (OMS[0]|EO|QS|EV|SO)
-	Out.controlWord = 0x1F;
-	yield();
-
-	while((In.statusWord & 0x1400) != 0x1400)
-	{
-		if(i >= 500)
+		i+=1;*/
+		if(In.externalCommand > 0)
 		{
-			VmmDebugOutputInt(In.dInput);
-			i = 0;
+			stopNow = true;
+			Out.controlWord = 0; //quickstop
 		}
-		i+=1;
 		yield();
 	}
 
-
-
-	od_write(0x2300, 0x00, 0);
+	//od_write(0x2300, 0x00, 0);
+	commandPetal = 0;
 	yield();
-
 }
 
 
